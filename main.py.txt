@@ -1,0 +1,93 @@
+import logging
+import pytesseract
+from PIL import Image
+import yfinance as yf
+import pandas as pd
+import io
+import numpy as np
+from sklearn.linear_model import LogisticRegression
+from ta.trend import MACD
+from ta.momentum import RSIIndicator
+from telegram import Update
+from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext
+
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+
+# Basic AI Model (Dummy for demo)
+def train_model(data):
+    data['MACD'] = MACD(data['Close']).macd()
+    data['RSI'] = RSIIndicator(data['Close']).rsi()
+    data = data.dropna()
+    data['Target'] = np.where(data['Close'].shift(-1) > data['Close'], 1, 0)
+
+    X = data[['MACD', 'RSI']]
+    y = data['Target']
+    model = LogisticRegression().fit(X, y)
+    return model, X.iloc[-1:]
+
+# Support & Resistance (basic logic)
+def get_support_resistance(data):
+    close = data['Close']
+    support = close.rolling(window=10).min().iloc[-1]
+    resistance = close.rolling(window=10).max().iloc[-1]
+    return round(support, 2), round(resistance, 2)
+
+# Image → Symbol Extract
+def extract_symbol_from_image(image: Image.Image):
+    text = pytesseract.image_to_string(image)
+    for line in text.split('\n'):
+        if line.strip().isupper() and len(line.strip()) <= 10:
+            return line.strip()
+    return None
+
+# Handle image
+def handle_photo(update: Update, context: CallbackContext):
+    photo_file = update.message.photo[-1].get_file()
+    photo_bytes = io.BytesIO()
+    photo_file.download(out=photo_bytes)
+    image = Image.open(photo_bytes)
+    symbol = extract_symbol_from_image(image)
+
+    if symbol:
+        update.message.reply_text(f"📥 Symbol Detected: {symbol}\n📊 Fetching Data...")
+        try:
+            data = yf.download(symbol + '.NS', period='60d', interval='1d')
+            if data.empty:
+                update.message.reply_text("❌ Data not found.")
+                return
+
+            model, latest_data = train_model(data)
+            prediction = model.predict(latest_data)[0]
+            prob = model.predict_proba(latest_data)[0][prediction]
+
+            trend = "📈 Uptrend expected" if prediction == 1 else "📉 Downtrend expected"
+            support, resistance = get_support_resistance(data)
+
+            update.message.reply_text(
+                f"📈 Trend: {trend}\n"
+                f"🧱 Support: ₹{support}\n"
+                f"🚧 Resistance: ₹{resistance}\n"
+                f"🔍 Confidence: {round(prob * 100, 2)}%"
+            )
+        except Exception as e:
+            update.message.reply_text(f"❌ Error: {e}")
+    else:
+        update.message.reply_text("❌ Symbol not detected. कृपया साफ़ chart भेजें।")
+
+# Start command
+def start(update: Update, context: CallbackContext):
+    update.message.reply_text("नमस्ते! 📊 Chart Image भेजो और मैं आपको Trend + Support & Resistance बताऊँगा।")
+
+def main():
+    TOKEN = "YOUR_BOT_TOKEN_HERE"
+    updater = Updater(TOKEN)
+    dp = updater.dispatcher
+
+    dp.add_handler(CommandHandler("start", start))
+    dp.add_handler(MessageHandler(Filters.photo, handle_photo))
+
+    updater.start_polling()
+    updater.idle()
+
+if __name__ == '__main__':
+    main()
